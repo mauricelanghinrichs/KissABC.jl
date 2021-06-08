@@ -10,6 +10,8 @@ import AbstractMCMC: sample, step, MCMCThreads, MCMCDistributed
 using Random
 import Base.length
 
+using FLoops # added by ML
+
 @reexport using MonteCarloMeasurements
 @reexport using Distributions
 
@@ -17,6 +19,7 @@ include("priors.jl")
 include("types.jl")
 include("transition.jl")
 include("smc.jl")
+include("abcde_floop.jl") # added by ML
 
 struct AIS <: AbstractMCMC.AbstractSampler
     nparticles::Int
