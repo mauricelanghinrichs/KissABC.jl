@@ -14,6 +14,17 @@
 # println(typeof(logπ)) => Vector{Float64}
 # println(typeof(Δs)) => Vector{Float64}
 
+# NOTE: the op tuple operations (also on a Particle) seem to
+# be zero-allocating (both immutable types!, no heap memory needed) and can be
+# broadcasted (over multiple elements in a tuple or Particle.x); values inside
+# the tuples are all plain data (int, float), so that this should be no problem
+# for multithreading (although zero-allocation, nothing is changed in-place,
+# just plain data calculation in stack memory); in the end written to nθs
+# (which in each generation is created as deepcopy and creates allocations, by identity.());
+# see also seems tests in polylox_env_ABC_HSC_test.jl
+# so all things at θs[i], logπ[i], Δs[i] are immutable, such as Vector{SomeType}()
+# with SomeType immutable as in my question (https://discourse.julialang.org/t/how-to-implement-multi-threading-with-external-in-place-mutable-variables/62610/3)
+
 # NOTE: @reduce needed? if yes
 # use solution like this https://discourse.julialang.org/t/using-floops-jl-to-update-array-counters/58805
 # or this (histogram)? https://juliafolds.github.io/data-parallelism/tutorials/quick-introduction/
@@ -46,7 +57,7 @@ function abcde_init!(prior, dist!, varexternal, θs, logπ, Δs, nparticles, rng
             Δs[i] = dist!(θs[i].x, ve)
         end
         while (!isfinite(Δs[i])) || (!isfinite(logπ[i]))
-            θs[i]=op(float, Particle(rand(trng, prior)))
+            θs[i] = op(float, Particle(rand(trng, prior)))
             logπ[i] = logpdf(prior, push_p(prior,θs[i].x))
             Δs[i] = dist!(θs[i].x, ve)
         end
@@ -78,6 +89,7 @@ function abcde_swarm!(prior, dist!, varexternal, θs, logπ, Δs, nθs, nlogπ, 
         while b == a || b == s
             b = rand(trng,1:nparticles)
         end
+        # θp is a new Particle with new tuple values (.x) [see comment above]
         θp = op(+,θs[s],op(*,op(-,θs[a],θs[b]), γ))
         lπ = logpdf(prior, push_p(prior,θp.x))
         w_prior = lπ - logπ[i]
