@@ -20,6 +20,7 @@ include("types.jl")
 include("transition.jl")
 include("smc.jl")
 include("abcde_floop.jl") # added by ML
+include("abcde_floop_blobs.jl") # added by ML
 
 struct AIS <: AbstractMCMC.AbstractSampler
     nparticles::Int
