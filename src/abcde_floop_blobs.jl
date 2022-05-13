@@ -29,7 +29,7 @@
 # use solution like this https://discourse.julialang.org/t/using-floops-jl-to-update-array-counters/58805
 # or this (histogram)? https://juliafolds.github.io/data-parallelism/tutorials/quick-introduction/
 
-function abcde_init!(prior, dist!, varexternal, θs, logπ, Δs, nparticles, rng, ex)
+function abcde_init!(prior, dist!, varexternal, θs, logπ, Δs, nparticles, rng, ex, blobs)
     # calculate cost/dist for each particle
     # (re-draw parameters if not finite)
 
@@ -54,18 +54,22 @@ function abcde_init!(prior, dist!, varexternal, θs, logπ, Δs, nparticles, rng
         ex!=SequentialEx() && (trng=Random.default_rng(Threads.threadid());)
 
         if isfinite(logπ[i])
-            Δs[i] = dist!(θs[i].x, ve)
+            d, blob = dist!(θs[i].x, ve)
+            Δs[i] = d
+            blobs[i] = blob
         end
         while (!isfinite(Δs[i])) || (!isfinite(logπ[i]))
             θs[i] = op(float, Particle(rand(trng, prior)))
             logπ[i] = logpdf(prior, push_p(prior,θs[i].x))
-            Δs[i] = dist!(θs[i].x, ve)
+            d, blob = dist!(θs[i].x, ve)
+            Δs[i] = d
+            blobs[i] = blob
         end
     end
 end
 
 function abcde_swarm!(prior, dist!, varexternal, θs, logπ, Δs, nθs, nlogπ, nΔs,
-                    ϵ_pop, ϵ_target, γ, nparticles, nsims, earlystop, rng, ex)
+                    ϵ_pop, ϵ_target, γ, nparticles, nsims, earlystop, rng, ex, nblobs)
     @floop ex for i in 1:nparticles
         @init ve = deepcopy(varexternal)
 
@@ -95,11 +99,12 @@ function abcde_swarm!(prior, dist!, varexternal, θs, logπ, Δs, nθs, nlogπ, 
         w_prior = lπ - logπ[i]
         log(rand(trng)) > min(0,w_prior) && continue
         nsims[i]+=1
-        dp = dist!(θp.x, ve)
+        dp, blob = dist!(θp.x, ve)
         if dp <= max(ϵ, Δs[i])
             nΔs[i] = dp
             nθs[i] = θp
             nlogπ[i] = lπ
+            nblobs[i] = blob
         end
     end
 end
@@ -107,7 +112,6 @@ end
 function abcde!(prior, dist!, ϵ_target, varexternal; nparticles=50, generations=20, α=0, earlystop=false,
                 verbose=true, rng=Random.GLOBAL_RNG, proposal_width=1.0,
                 ex=ThreadedEx())
-    @info("Running on experimental abcde! method")
     @info("Running abcde! with executor ", typeof(ex))
 
     ### this seems to be initialisation
@@ -118,9 +122,11 @@ function abcde!(prior, dist!, ϵ_target, varexternal; nparticles=50, generations
     logπ = [logpdf(prior, push_p(prior,θs[i].x)) for i = 1:nparticles]
 
     ve = deepcopy(varexternal)
-    Δs = fill(dist!(θs[1].x, ve),nparticles)
+    d1, blob1 = dist!(θs[1].x, ve)
+    Δs = fill(d1, nparticles)
+    blobs = fill(blob1, nparticles)
 
-    abcde_init!(prior, dist!, varexternal, θs, logπ, Δs, nparticles, rng, ex)
+    abcde_init!(prior, dist!, varexternal, θs, logπ, Δs, nparticles, rng, ex, blobs)
     ###
 
     ### actual ABC run
@@ -132,9 +138,17 @@ function abcde!(prior, dist!, ϵ_target, varexternal; nparticles=50, generations
         iters+=1
         # identity.() behaves like deepcopy(), i.e. == is true, === is false
         # so there are n=new object that can be mutated without data races
+        # NOTE: NO! internal variables in a vector still reference the same?!
+        # I think this is why Particle (and elementary floats ints anyway) are
+        # created anew* in every iteration (not in-place updated/mutated); hence
+        # I also should do this with anything that is passed/used in blobs!
+        # *this is why identity is probably the right thing: particles/θs that
+        # are kept will reference the same memory and only replaced particles
+        # are overwritten and create new pointer (strictly, without mutating the old one)
         nθs = identity.(θs)
         nΔs = identity.(Δs)
         nlogπ=identity.(logπ)
+        nblobs=identity.(blobs)
 
         # returns minimal and maximal distance/cost
         ϵ_l, ϵ_h = extrema(Δs)
@@ -144,11 +158,12 @@ function abcde!(prior, dist!, ϵ_target, varexternal; nparticles=50, generations
         ϵ_pop = max(ϵ_target,ϵ_l + α * (ϵ_h - ϵ_l))
 
         abcde_swarm!(prior, dist!, varexternal, θs, logπ, Δs, nθs, nlogπ, nΔs,
-                            ϵ_pop, ϵ_target, γ, nparticles, nsims, earlystop, rng, ex)
+                            ϵ_pop, ϵ_target, γ, nparticles, nsims, earlystop, rng, ex, nblobs)
 
         θs = nθs
         Δs = nΔs
         logπ = nlogπ
+        blobs = nblobs
         ncomplete = 1 - sum(Δs .> ϵ_target) / nparticles
         if verbose && (ncomplete != complete || complete >= (nparticles - 1) / nparticles)
             @info "Finished run:" completion=ncomplete nsim = sum(nsims) range_ϵ = extrema(Δs)
@@ -163,7 +178,7 @@ function abcde!(prior, dist!, ϵ_target, varexternal; nparticles=50, generations
     l = length(prior)
     P = map(x -> Particles(x), getindex.(θs, i) for i = 1:l)
     length(P)==1 && (P=first(P))
-    (P=P, C=Particles(Δs), reached_ϵ=conv)
+    (P=P, C=Particles(Δs), reached_ϵ=conv, blobs=blobs)
 end
 
 export abcde!
